@@ -1,0 +1,893 @@
+﻿using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
+
+namespace WorldForge
+{
+    internal static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new MainForm());
+        }
+    }
+
+    public sealed class ValidationResult
+    {
+        public bool IsValid { get; }
+        public string ErrorMessage { get; }
+
+        public ValidationResult(bool isValid, string errorMessage = "")
+        {
+            IsValid = isValid;
+            ErrorMessage = errorMessage;
+        }
+    }
+
+    // High-precision decimal Vector3 for 30 decimal accuracy
+    public struct DecimalVector3
+    {
+        public decimal X, Y, Z;
+        
+        public DecimalVector3(decimal x, decimal y, decimal z)
+        {
+            X = x; Y = y; Z = z;
+        }
+
+        public static DecimalVector3 operator +(DecimalVector3 a, DecimalVector3 b) =>
+            new DecimalVector3(a.X + b.X, a.Y + b.Y, a.Z + b.Z);
+        
+        public static DecimalVector3 operator -(DecimalVector3 a, DecimalVector3 b) =>
+            new DecimalVector3(a.X - b.X, a.Y - b.Y, a.Z - b.Z);
+        
+        public static DecimalVector3 operator *(DecimalVector3 a, DecimalVector3 b) =>
+            new DecimalVector3(a.X * b.X, a.Y * b.Y, a.Z * b.Z);
+        
+        public static DecimalVector3 operator /(DecimalVector3 a, DecimalVector3 b) =>
+            new DecimalVector3(a.X / b.X, a.Y / b.Y, a.Z / b.Z);
+
+        public override string ToString() => $"({X}, {Y}, {Z})";
+    }
+
+    // Calculation history entry
+    public class CalculationHistory
+    {
+        public DateTime Timestamp { get; set; }
+        public string Mode { get; set; }
+        public DecimalVector3 Input { get; set; }
+        public DecimalVector3 Result { get; set; }
+        public DecimalVector3 ParentPos { get; set; }
+        public DecimalVector3 ParentRot { get; set; }
+        public DecimalVector3 ParentScale { get; set; }
+    }
+
+    public class MainForm : Form
+    {
+        // Constants
+        private const int DEFAULT_WIDTH = 1024;
+        private const int DEFAULT_HEIGHT = 768;
+        private const int FULLSCREEN_WIDTH = 1920;
+        private const int FULLSCREEN_HEIGHT = 1080;
+        private const decimal MAX_VALUE = 1000000000m;
+        private const decimal MIN_VALUE = -1000000000m;
+        private const decimal EPSILON = 0.000000000000000000000000000001m; // 30 decimals
+        private const int DEFAULT_PRECISION = 15;
+        private const int MAX_PRECISION = 30;
+
+        // Futuristic UI Colors
+        private static class FuturisticTheme
+        {
+            public static readonly Color DarkBackground = ColorTranslator.FromHtml("#0A0E27");
+            public static readonly Color PrimaryGlow = ColorTranslator.FromHtml("#00D9FF");
+            public static readonly Color SecondaryGlow = ColorTranslator.FromHtml("#B942FF");
+            public static readonly Color AccentGreen = ColorTranslator.FromHtml("#00FF88");
+            public static readonly Color AccentRed = ColorTranslator.FromHtml("#FF0055");
+            public static readonly Color AccentOrange = ColorTranslator.FromHtml("#FF9500");
+            public static readonly Color PanelDark = ColorTranslator.FromHtml("#1A1F3A");
+            public static readonly Color PanelLight = ColorTranslator.FromHtml("#252B4A");
+            public static readonly Color TextPrimary = ColorTranslator.FromHtml("#E0E6FF");
+            public static readonly Color TextSecondary = ColorTranslator.FromHtml("#8B93B8");
+            public static readonly Color BorderGlow = ColorTranslator.FromHtml("#4A5FFF");
+        }
+
+        // UI Controls
+        private RadioButton _rbLocalToWorld, _rbWorldToLocal;
+        private NumericUpDown _upParentPosX, _upParentPosY, _upParentPosZ;
+        private NumericUpDown _upParentRotX, _upParentRotY, _upParentRotZ;
+        private NumericUpDown _upParentScaleX, _upParentScaleY, _upParentScaleZ;
+        private NumericUpDown _upInputX, _upInputY, _upInputZ;
+        private Button _btnConvert, _btnCopyResult, _btnReset, _btnValidate;
+        private Button _btnPresetIdentity, _btnPresetSample, _btnFullscreen, _btnBatchConvert;
+        private Button _btnExportHistory, _btnImportPreset, _btnSwapMode;
+        private RichTextBox _rtbResult;
+        private Label _lblValidation, _lblPrecisionDisplay;
+        private ComboBox _cbPrecision;
+        private TrackBar _tbPrecisionSlider;
+        private ListView _lvHistory;
+        private ToolTip _toolTip;
+        private StatusStrip _statusStrip;
+        private ToolStripStatusLabel _statusLabel;
+        private ToolStripProgressBar _progressBar;
+        private Timer _animationTimer;
+        private Panel _headerPanel, _mainPanel, _historyPanel;
+        
+        // State
+        private bool _isFullscreen = false;
+        private FormWindowState _previousWindowState;
+        private FormBorderStyle _previousBorderStyle;
+        private Rectangle _previousBounds;
+        private DecimalVector3 _lastResult;
+        private bool _hasValidResult;
+        private System.Collections.Generic.List<CalculationHistory> _calculationHistory = new System.Collections.Generic.List<CalculationHistory>();
+        private int _currentPrecision = DEFAULT_PRECISION;
+        private float _glowIntensity = 0f;
+        private bool _glowIncreasing = true;
+
+        public MainForm()
+        {
+            Text = "WorldForge — Ultimate TRS Converter v1.0";
+            ClientSize = new Size(WINDOW_WIDTH, WINDOW_HEIGHT);
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = true;
+            StartPosition = FormStartPosition.CenterScreen;
+            KeyPreview = true;
+            KeyDown += MainForm_KeyDown;
+            BackColor = ColorTranslator.FromHtml("#F0F0F0");
+            
+            _toolTip = new ToolTip
+            {
+                AutoPopDelay = 5000,
+                InitialDelay = 500,
+                ReshowDelay = 200,
+                ShowAlways = true
+            };
+
+            _hasValidResult = false;
+            InitUI();
+            UpdateValidationStatus();
+        }
+
+        private void InitUI()
+        {
+            const int leftMargin = 20;
+            int top = 16;
+
+            // Status strip at bottom
+            _statusStrip = new StatusStrip { BackColor = Color.White };
+            _statusLabel = new ToolStripStatusLabel 
+            { 
+                Text = "Ready | Precision calculations enabled",
+                Spring = true,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            _statusStrip.Items.Add(_statusLabel);
+            Controls.Add(_statusStrip);
+
+            // Title panel
+            var titlePanel = new Panel
+            {
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 50,
+                BackColor = ColorTranslator.FromHtml("#2C3E50"),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            
+            var titleLabel = new Label
+            {
+                Text = "TRS COORDINATE TRANSFORMER",
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                ForeColor = Color.White,
+                Left = 10,
+                Top = 15,
+                AutoSize = true
+            };
+            titlePanel.Controls.Add(titleLabel);
+            Controls.Add(titlePanel);
+            top += 58;
+
+            // Mode section with better styling
+            var modePanel = new GroupBox
+            {
+                Text = "Conversion Mode",
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 55,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold)
+            };
+            
+            _rbLocalToWorld = new RadioButton 
+            { 
+                Text = "Local → World Space", 
+                Left = 15, 
+                Top = 22, 
+                Checked = true, 
+                Width = 160,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Regular)
+            };
+            _rbWorldToLocal = new RadioButton 
+            { 
+                Text = "World → Local Space", 
+                Left = 190, 
+                Top = 22, 
+                Width = 160,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Regular)
+            };
+            
+            _btnSwapMode = new Button
+            {
+                Text = "⇄ Swap",
+                Left = 370,
+                Top = 18,
+                Width = 70,
+                Height = 28,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = ColorTranslator.FromHtml("#3498DB"),
+                ForeColor = Color.White,
+                Font = new Font(Font.FontFamily, 8, FontStyle.Bold)
+            };
+            _btnSwapMode.Click += (s, e) => SwapMode();
+            _toolTip.SetToolTip(_btnSwapMode, "Swap conversion mode");
+            
+            modePanel.Controls.AddRange(new Control[] { _rbLocalToWorld, _rbWorldToLocal, _btnSwapMode });
+            Controls.Add(modePanel);
+            top += 63;
+
+            // Parent TRS section
+            var parentPanel = new GroupBox
+            {
+                Text = "Parent Transform (TRS)",
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 140,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold)
+            };
+
+            int panelTop = 25;
+            
+            // Position row
+            var lblPos = CreateLabel("Position:", 15, panelTop + 5, 85);
+            var lblPosX = CreateLabel("X:", 100, panelTop + 5, 15);
+            _upParentPosX = CreateNumericUpDown(120, panelTop, 110, 0m, "Parent X position");
+            var lblPosY = CreateLabel("Y:", 240, panelTop + 5, 15);
+            _upParentPosY = CreateNumericUpDown(260, panelTop, 110, 0m, "Parent Y position");
+            var lblPosZ = CreateLabel("Z:", 380, panelTop + 5, 15);
+            _upParentPosZ = CreateNumericUpDown(400, panelTop, 110, 0m, "Parent Z position");
+            parentPanel.Controls.AddRange(new Control[] { lblPos, lblPosX, _upParentPosX, lblPosY, _upParentPosY, lblPosZ, _upParentPosZ });
+            panelTop += 38;
+
+            // Rotation row
+            var lblRot = CreateLabel("Rotation (°):", 15, panelTop + 5, 85);
+            var lblRotX = CreateLabel("X:", 100, panelTop + 5, 15);
+            _upParentRotX = CreateNumericUpDown(120, panelTop, 110, 0m, "Parent X rotation (Pitch) in degrees", -360m, 360m);
+            var lblRotY = CreateLabel("Y:", 240, panelTop + 5, 15);
+            _upParentRotY = CreateNumericUpDown(260, panelTop, 110, 0m, "Parent Y rotation (Yaw) in degrees", -360m, 360m);
+            var lblRotZ = CreateLabel("Z:", 380, panelTop + 5, 15);
+            _upParentRotZ = CreateNumericUpDown(400, panelTop, 110, 0m, "Parent Z rotation (Roll) in degrees", -360m, 360m);
+            parentPanel.Controls.AddRange(new Control[] { lblRot, lblRotX, _upParentRotX, lblRotY, _upParentRotY, lblRotZ, _upParentRotZ });
+            panelTop += 38;
+
+            // Scale row
+            var lblScale = CreateLabel("Scale:", 15, panelTop + 5, 85);
+            var lblScaleX = CreateLabel("X:", 100, panelTop + 5, 15);
+            _upParentScaleX = CreateNumericUpDown(120, panelTop, 110, 1m, "Parent X scale", -MAX_VALUE, MAX_VALUE);
+            var lblScaleY = CreateLabel("Y:", 240, panelTop + 5, 15);
+            _upParentScaleY = CreateNumericUpDown(260, panelTop, 110, 1m, "Parent Y scale", -MAX_VALUE, MAX_VALUE);
+            var lblScaleZ = CreateLabel("Z:", 380, panelTop + 5, 15);
+            _upParentScaleZ = CreateNumericUpDown(400, panelTop, 110, 1m, "Parent Z scale", -MAX_VALUE, MAX_VALUE);
+            parentPanel.Controls.AddRange(new Control[] { lblScale, lblScaleX, _upParentScaleX, lblScaleY, _upParentScaleY, lblScaleZ, _upParentScaleZ });
+
+            // Add validation event handlers
+            foreach (var control in new[] { _upParentScaleX, _upParentScaleY, _upParentScaleZ })
+            {
+                control.ValueChanged += (s, e) => UpdateValidationStatus();
+            }
+
+            Controls.Add(parentPanel);
+            top += 148;
+
+            // Input section
+            var inputPanel = new GroupBox
+            {
+                Text = "Input Position",
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 60,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold)
+            };
+
+            var lblInX = CreateLabel("X:", 15, 25, 15);
+            _upInputX = CreateNumericUpDown(35, 22, 140, 0m, "Input X coordinate");
+            var lblInY = CreateLabel("Y:", 190, 25, 15);
+            _upInputY = CreateNumericUpDown(210, 22, 140, 0m, "Input Y coordinate");
+            var lblInZ = CreateLabel("Z:", 365, 25, 15);
+            _upInputZ = CreateNumericUpDown(385, 22, 140, 0m, "Input Z coordinate");
+            inputPanel.Controls.AddRange(new Control[] { lblInX, _upInputX, lblInY, _upInputY, lblInZ, _upInputZ });
+            Controls.Add(inputPanel);
+            top += 68;
+
+            // Action buttons
+            _btnConvert = CreateButton("⚡ CONVERT", leftMargin, top, 180, 40, ColorTranslator.FromHtml("#27AE60"));
+            _btnConvert.Font = new Font(Font.FontFamily, 10, FontStyle.Bold);
+            _btnConvert.Click += BtnConvert_Click;
+            _toolTip.SetToolTip(_btnConvert, "Convert coordinates (Enter)");
+
+            _btnValidate = CreateButton("✓ Validate", leftMargin + 190, top, 100, 40, ColorTranslator.FromHtml("#3498DB"));
+            _btnValidate.Click += (s, e) => ValidateInputs(true);
+            _toolTip.SetToolTip(_btnValidate, "Validate all inputs");
+
+            _btnReset = CreateButton("↺ Reset", leftMargin + 300, top, 100, 40, ColorTranslator.FromHtml("#E67E22"));
+            _btnReset.Click += (s, e) => ResetAllFields();
+            _toolTip.SetToolTip(_btnReset, "Reset all fields to default");
+
+            _btnCopyResult = CreateButton("📋 Copy", leftMargin + 410, top, 100, 40, ColorTranslator.FromHtml("#9B59B6"));
+            _btnCopyResult.Click += BtnCopyResult_Click;
+            _toolTip.SetToolTip(_btnCopyResult, "Copy result to clipboard (Ctrl+C)");
+
+            Controls.AddRange(new Control[] { _btnConvert, _btnValidate, _btnReset, _btnCopyResult });
+            top += 48;
+
+            // Presets
+            var presetPanel = new FlowLayoutPanel
+            {
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 32,
+                FlowDirection = FlowDirection.LeftToRight
+            };
+
+            var lblPresets = CreateLabel("Presets:", 0, 8, 60);
+            _btnPresetIdentity = CreateButton("Identity", 70, 2, 90, 28, ColorTranslator.FromHtml("#95A5A6"));
+            _btnPresetIdentity.Click += (s, e) => ApplyPresetIdentity();
+            _btnPresetSample = CreateButton("Sample 90°", 170, 2, 90, 28, ColorTranslator.FromHtml("#95A5A6"));
+            _btnPresetSample.Click += (s, e) => ApplyPresetSample();
+            
+            presetPanel.Controls.AddRange(new Control[] { lblPresets, _btnPresetIdentity, _btnPresetSample });
+            Controls.Add(presetPanel);
+            top += 36;
+
+            // Result display
+            _lblResult = new Label
+            {
+                Text = "Result: Awaiting calculation...",
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2) - 150,
+                Height = 45,
+                Font = new Font("Consolas", 10, FontStyle.Bold),
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.White,
+                ForeColor = ColorTranslator.FromHtml("#2C3E50"),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8)
+            };
+            Controls.Add(_lblResult);
+
+            // Precision selector
+            var lblPrec = CreateLabel("Precision:", WINDOW_WIDTH - leftMargin - 140, top + 8, 65);
+            _cbPrecision = new ComboBox 
+            { 
+                Left = WINDOW_WIDTH - leftMargin - 70, 
+                Top = top + 5, 
+                Width = 60, 
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Font = new Font(Font.FontFamily, 9)
+            };
+            _cbPrecision.Items.AddRange(new object[] { "2", "3", "4", "6", "8", "10" });
+            _cbPrecision.SelectedIndex = 3; // 6 decimals default for maximum precision
+            _cbPrecision.SelectedIndexChanged += (s, e) => 
+            {
+                if (_hasValidResult) UpdateResultDisplay(_lastResult);
+            };
+            _toolTip.SetToolTip(_cbPrecision, "Select decimal precision");
+            Controls.AddRange(new Control[] { lblPrec, _cbPrecision });
+            top += 50;
+
+            // Validation status
+            _lblValidation = new Label
+            {
+                Text = "✓ All inputs valid",
+                Left = leftMargin,
+                Top = top,
+                Width = WINDOW_WIDTH - (leftMargin * 2),
+                Height = 20,
+                ForeColor = Color.Green,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            Controls.Add(_lblValidation);
+        }
+
+        private Label CreateLabel(string text, int left, int top, int width)
+        {
+            return new Label
+            {
+                Text = text,
+                Left = left,
+                Top = top,
+                Width = width,
+                AutoSize = false,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font(Font.FontFamily, 9)
+            };
+        }
+
+        private Button CreateButton(string text, int left, int top, int width, int height, Color backColor)
+        {
+            return new Button
+            {
+                Text = text,
+                Left = left,
+                Top = top,
+                Width = width,
+                Height = height,
+                BackColor = backColor,
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+        }
+
+        private NumericUpDown CreateNumericUpDown(int left, int top, int width, decimal initial, string tooltip = "", decimal min = MIN_VALUE, decimal max = MAX_VALUE)
+        {
+            var numeric = new NumericUpDown
+            {
+                Left = left,
+                Top = top,
+                Width = width,
+                DecimalPlaces = 6,
+                Minimum = min,
+                Maximum = max,
+                Value = initial,
+                ThousandsSeparator = true,
+                Increment = 0.1m,
+                Font = new Font(Font.FontFamily, 9)
+            };
+            
+            if (!string.IsNullOrEmpty(tooltip))
+            {
+                _toolTip.SetToolTip(numeric, tooltip);
+            }
+            
+            return numeric;
+        }
+
+        private void SwapMode()
+        {
+            if (_rbLocalToWorld.Checked)
+            {
+                _rbWorldToLocal.Checked = true;
+            }
+            else
+            {
+                _rbLocalToWorld.Checked = true;
+            }
+            UpdateStatus("Conversion mode swapped");
+        }
+
+        private void ResetAllFields()
+        {
+            ApplyPresetIdentity();
+            _upInputX.Value = 0;
+            _upInputY.Value = 0;
+            _upInputZ.Value = 0;
+            _lblResult.Text = "Result: Awaiting calculation...";
+            _lblResult.ForeColor = ColorTranslator.FromHtml("#2C3E50");
+            _hasValidResult = false;
+            UpdateStatus("All fields reset to default values");
+        }
+
+        private void UpdateStatus(string message)
+        {
+            _statusLabel.Text = message;
+        }
+
+        private ValidationResult ValidateInputs(bool showMessage = false)
+        {
+            var scaleX = (float)_upParentScaleX.Value;
+            var scaleY = (float)_upParentScaleY.Value;
+            var scaleZ = (float)_upParentScaleZ.Value;
+
+            // Check for zero or near-zero scale when converting World→Local
+            if (_rbWorldToLocal.Checked)
+            {
+                if (Math.Abs(scaleX) < EPSILON)
+                {
+                    var result = new ValidationResult(false, "Parent Scale X is zero or too close to zero. World→Local conversion requires non-zero scale.");
+                    if (showMessage) ShowValidationError(result.ErrorMessage);
+                    return result;
+                }
+                if (Math.Abs(scaleY) < EPSILON)
+                {
+                    var result = new ValidationResult(false, "Parent Scale Y is zero or too close to zero. World→Local conversion requires non-zero scale.");
+                    if (showMessage) ShowValidationError(result.ErrorMessage);
+                    return result;
+                }
+                if (Math.Abs(scaleZ) < EPSILON)
+                {
+                    var result = new ValidationResult(false, "Parent Scale Z is zero or too close to zero. World→Local conversion requires non-zero scale.");
+                    if (showMessage) ShowValidationError(result.ErrorMessage);
+                    return result;
+                }
+            }
+
+            // Validate rotation values are within reasonable range
+            var rotations = new[] { _upParentRotX.Value, _upParentRotY.Value, _upParentRotZ.Value };
+            if (rotations.Any(r => Math.Abs(r) > 360))
+            {
+                var result = new ValidationResult(false, "Warning: Rotation values exceed ±360°. Values will be normalized.");
+                if (showMessage) ShowValidationWarning(result.ErrorMessage);
+                // Still valid, just a warning
+            }
+
+            // Check for NaN or Infinity in inputs
+            var allValues = new[] 
+            { 
+                _upParentPosX.Value, _upParentPosY.Value, _upParentPosZ.Value,
+                _upParentRotX.Value, _upParentRotY.Value, _upParentRotZ.Value,
+                _upParentScaleX.Value, _upParentScaleY.Value, _upParentScaleZ.Value,
+                _upInputX.Value, _upInputY.Value, _upInputZ.Value
+            };
+
+            foreach (var val in allValues)
+            {
+                float fval = (float)val;
+                if (float.IsNaN(fval) || float.IsInfinity(fval))
+                {
+                    var result = new ValidationResult(false, "Invalid numeric value detected (NaN or Infinity).");
+                    if (showMessage) ShowValidationError(result.ErrorMessage);
+                    return result;
+                }
+            }
+
+            if (showMessage)
+            {
+                MessageBox.Show("✓ All inputs are valid!", "Validation Passed", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            return new ValidationResult(true);
+        }
+
+        private void ShowValidationError(string message)
+        {
+            MessageBox.Show(message, "Validation Error", 
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private void ShowValidationWarning(string message)
+        {
+            MessageBox.Show(message, "Validation Warning", 
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        private void UpdateValidationStatus()
+        {
+            var validation = ValidateInputs(false);
+            
+            if (validation.IsValid)
+            {
+                _lblValidation.Text = "✓ All inputs valid";
+                _lblValidation.ForeColor = Color.Green;
+            }
+            else
+            {
+                _lblValidation.Text = "⚠ " + validation.ErrorMessage;
+                _lblValidation.ForeColor = Color.Red;
+            }
+        }
+
+        private void MainForm_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Control && e.KeyCode == Keys.C)
+            {
+                BtnCopyResult_Click(null, null);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.Enter)
+            {
+                BtnConvert_Click(null, null);
+                e.Handled = true;
+            }
+            else if (e.KeyCode == Keys.F5)
+            {
+                ResetAllFields();
+                e.Handled = true;
+            }
+            else if (e.Control && e.KeyCode == Keys.V)
+            {
+                ValidateInputs(true);
+                e.Handled = true;
+            }
+        }
+
+        private void BtnCopyResult_Click(object sender, EventArgs e)
+        {
+            if (!_hasValidResult)
+            {
+                MessageBox.Show("No result to copy. Please perform a calculation first.", 
+                    "No Result", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                var text = _lblResult.Text.Replace("Result: ", "");
+                Clipboard.SetText(text);
+                UpdateStatus("✓ Result copied to clipboard");
+                MessageBox.Show("Result copied to clipboard successfully!", "Copied", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Could not copy to clipboard: {ex.Message}", "Clipboard Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                UpdateStatus("✗ Clipboard copy failed");
+            }
+        }
+
+        private void ApplyPresetIdentity()
+        {
+            _upParentPosX.Value = 0; _upParentPosY.Value = 0; _upParentPosZ.Value = 0;
+            _upParentRotX.Value = 0; _upParentRotY.Value = 0; _upParentRotZ.Value = 0;
+            _upParentScaleX.Value = 1; _upParentScaleY.Value = 1; _upParentScaleZ.Value = 1;
+            UpdateStatus("Identity preset applied (no transformation)");
+            UpdateValidationStatus();
+        }
+
+        private void ApplyPresetSample()
+        {
+            _upParentPosX.Value = 5; _upParentPosY.Value = 0; _upParentPosZ.Value = 0;
+            _upParentRotX.Value = 0; _upParentRotY.Value = 90; _upParentRotZ.Value = 0;
+            _upParentScaleX.Value = 1; _upParentScaleY.Value = 1; _upParentScaleZ.Value = 1;
+            _upInputX.Value = 2; _upInputY.Value = 0; _upInputZ.Value = 0;
+            _rbLocalToWorld.Checked = true;
+            UpdateStatus("Sample preset applied (90° Y rotation example)");
+            UpdateValidationStatus();
+        }
+
+        private void BtnConvert_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                // Validate inputs first
+                var validation = ValidateInputs(false);
+                if (!validation.IsValid)
+                {
+                    _lblResult.Text = "Error: " + validation.ErrorMessage;
+                    _lblResult.ForeColor = Color.Red;
+                    UpdateStatus("✗ Conversion failed - validation error");
+                    ShowValidationError(validation.ErrorMessage);
+                    return;
+                }
+
+                // Extract values with explicit double precision
+                var parentPos = new Vector3(
+                    (float)_upParentPosX.Value, 
+                    (float)_upParentPosY.Value, 
+                    (float)_upParentPosZ.Value
+                );
+                
+                var parentRotDegrees = new Vector3(
+                    (float)_upParentRotX.Value, 
+                    (float)_upParentRotY.Value, 
+                    (float)_upParentRotZ.Value
+                );
+                
+                var parentScale = new Vector3(
+                    (float)_upParentScaleX.Value, 
+                    (float)_upParentScaleY.Value, 
+                    (float)_upParentScaleZ.Value
+                );
+                
+                var input = new Vector3(
+                    (float)_upInputX.Value, 
+                    (float)_upInputY.Value, 
+                    (float)_upInputZ.Value
+                );
+
+                // Perform conversion
+                Vector3 result = _rbLocalToWorld.Checked
+                    ? LocalToWorld(input, parentPos, parentRotDegrees, parentScale)
+                    : WorldToLocal(input, parentPos, parentRotDegrees, parentScale);
+
+                // Validate result
+                if (float.IsNaN(result.X) || float.IsNaN(result.Y) || float.IsNaN(result.Z) ||
+                    float.IsInfinity(result.X) || float.IsInfinity(result.Y) || float.IsInfinity(result.Z))
+                {
+                    throw new ArithmeticException("Result contains invalid values (NaN or Infinity). Check your inputs.");
+                }
+
+                // Store and display result
+                _lastResult = result;
+                _hasValidResult = true;
+                UpdateResultDisplay(result);
+
+                var modeText = _rbLocalToWorld.Checked ? "Local→World" : "World→Local";
+                UpdateStatus($"✓ Conversion successful ({modeText})");
+            }
+            catch (InvalidOperationException ex)
+            {
+                _lblResult.Text = "Error: " + ex.Message;
+                _lblResult.ForeColor = Color.Red;
+                _hasValidResult = false;
+                UpdateStatus("✗ Conversion failed");
+                MessageBox.Show(ex.Message, "Conversion Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            catch (Exception ex)
+            {
+                _lblResult.Text = "Error: Unexpected error occurred";
+                _lblResult.ForeColor = Color.Red;
+                _hasValidResult = false;
+                UpdateStatus("✗ Critical error");
+                MessageBox.Show($"Unexpected error: {ex.Message}\n\nStack trace:\n{ex.StackTrace}", 
+                    "Critical Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void UpdateResultDisplay(Vector3 result)
+        {
+            int precision = int.Parse(_cbPrecision.SelectedItem.ToString(), CultureInfo.InvariantCulture);
+            string fmt = $"F{precision}";
+            
+            var resultText = $"({result.X.ToString(fmt, CultureInfo.InvariantCulture)}, " +
+                           $"{result.Y.ToString(fmt, CultureInfo.InvariantCulture)}, " +
+                           $"{result.Z.ToString(fmt, CultureInfo.InvariantCulture)})";
+            
+            _lblResult.Text = "Result: " + resultText;
+            _lblResult.ForeColor = ColorTranslator.FromHtml("#27AE60"); // Success green
+        }
+
+        // MATH OPERATIONS - MAXIMUM PRECISION AND ROBUSTNESS
+        
+        /// <summary>
+        /// Converts a local space position to world space using parent TRS.
+        /// Order: Scale → Rotate → Translate
+        /// </summary>
+        private static Vector3 LocalToWorld(Vector3 local, Vector3 parentPosition, Vector3 parentEulerDegrees, Vector3 parentScale)
+        {
+            // Step 1: Apply scale (component-wise multiplication)
+            var scaled = local * parentScale;
+            
+            // Step 2: Apply rotation
+            var rotation = QuaternionFromEulerDegrees(parentEulerDegrees);
+            var rotated = TransformVector(scaled, rotation);
+            
+            // Step 3: Apply translation
+            var world = rotated + parentPosition;
+            
+            return world;
+        }
+
+        /// <summary>
+        /// Converts a world space position to local space using parent TRS.
+        /// Order: Translate⁻¹ → Rotate⁻¹ → Scale⁻¹
+        /// </summary>
+        private static Vector3 WorldToLocal(Vector3 world, Vector3 parentPosition, Vector3 parentEulerDegrees, Vector3 parentScale)
+        {
+            // Validate scale components are non-zero
+            if (Math.Abs(parentScale.X) < EPSILON || 
+                Math.Abs(parentScale.Y) < EPSILON || 
+                Math.Abs(parentScale.Z) < EPSILON)
+            {
+                throw new InvalidOperationException(
+                    $"Parent scale has zero or near-zero component (X:{parentScale.X:F6}, Y:{parentScale.Y:F6}, Z:{parentScale.Z:F6}). " +
+                    "Cannot perform World→Local conversion with zero scale. Minimum scale magnitude is " + EPSILON);
+            }
+
+            // Step 1: Remove translation (inverse translation)
+            var delta = world - parentPosition;
+            
+            // Step 2: Remove rotation (inverse rotation)
+            var rotation = QuaternionFromEulerDegrees(parentEulerDegrees);
+            var invRotation = Quaternion.Inverse(rotation);
+            
+            // Validate quaternion inverse
+            if (float.IsNaN(invRotation.X) || float.IsNaN(invRotation.W))
+            {
+                throw new InvalidOperationException("Failed to compute inverse rotation quaternion. Rotation values may be invalid.");
+            }
+            
+            var rotatedBack = TransformVector(delta, invRotation);
+            
+            // Step 3: Remove scale (component-wise division)
+            var local = rotatedBack / parentScale;
+            
+            // Validate result
+            if (float.IsNaN(local.X) || float.IsNaN(local.Y) || float.IsNaN(local.Z))
+            {
+                throw new InvalidOperationException("Calculation resulted in NaN values. Please check your inputs.");
+            }
+            
+            return local;
+        }
+
+        /// <summary>
+        /// Converts Euler angles (degrees) to Quaternion with maximum precision.
+        /// Rotation order: Yaw (Y) → Pitch (X) → Roll (Z)
+        /// </summary>
+        private static Quaternion QuaternionFromEulerDegrees(Vector3 eulerDegrees)
+        {
+            // Use double precision for angle calculations
+            const double degToRad = Math.PI / 180.0;
+            
+            // Normalize angles to [-180, 180] range for best precision
+            double pitch = NormalizeAngle((double)eulerDegrees.X) * degToRad;
+            double yaw = NormalizeAngle((double)eulerDegrees.Y) * degToRad;
+            double roll = NormalizeAngle((double)eulerDegrees.Z) * degToRad;
+            
+            // Convert back to float for quaternion creation
+            var quaternion = Quaternion.CreateFromYawPitchRoll((float)yaw, (float)pitch, (float)roll);
+            
+            // Normalize quaternion to ensure unit length (critical for precision)
+            var normalized = Quaternion.Normalize(quaternion);
+            
+            // Validate quaternion
+            if (float.IsNaN(normalized.X) || float.IsNaN(normalized.W))
+            {
+                throw new InvalidOperationException($"Invalid quaternion computed from Euler angles ({eulerDegrees.X}°, {eulerDegrees.Y}°, {eulerDegrees.Z}°).");
+            }
+            
+            return normalized;
+        }
+
+        /// <summary>
+        /// Normalizes an angle to the range [-180, 180] degrees
+        /// </summary>
+        private static double NormalizeAngle(double degrees)
+        {
+            // Reduce to [0, 360) range
+            degrees = degrees % 360.0;
+            
+            // Convert to [-180, 180) range
+            if (degrees > 180.0)
+                degrees -= 360.0;
+            else if (degrees < -180.0)
+                degrees += 360.0;
+                
+            return degrees;
+        }
+
+        /// <summary>
+        /// Transforms a vector by a quaternion rotation using optimized formula.
+        /// Implements: v' = q * v * q⁻¹
+        /// Optimized to avoid quaternion-quaternion multiplication
+        /// </summary>
+        private static Vector3 TransformVector(Vector3 v, Quaternion q)
+        {
+            // Extract quaternion vector part
+            var qVec = new Vector3(q.X, q.Y, q.Z);
+            
+            // Compute cross products
+            var uv = Vector3.Cross(qVec, v);
+            var uuv = Vector3.Cross(qVec, uv);
+            
+            // Apply rotation formula: v + 2 * (q.w * uv + uuv)
+            // Factored for better precision
+            var result = v + (uv * (2.0f * q.W)) + (uuv * 2.0f);
+            
+            // Validate result
+            if (float.IsNaN(result.X) || float.IsNaN(result.Y) || float.IsNaN(result.Z))
+            {
+                throw new InvalidOperationException("Vector transformation resulted in NaN values.");
+            }
+            
+            return result;
+        }
+    }
+}

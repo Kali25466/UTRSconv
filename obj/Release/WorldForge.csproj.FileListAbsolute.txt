@@ -1,0 +1,11 @@
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.csproj.AssemblyReference.cache
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.Properties.Resources.resources
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.csproj.GenerateResource.cache
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.csproj.CoreCompileInputs.cache
+D:\projects\WorldForge\WorldForge\bin\Release\WorldForge.exe.config
+D:\projects\WorldForge\WorldForge\bin\Release\WorldForge.exe
+D:\projects\WorldForge\WorldForge\bin\Release\WorldForge.pdb
+D:\projects\WorldForge\WorldForge\bin\Release\System.Numerics.Vectors.dll
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.csproj.Up2Date
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.exe
+D:\projects\WorldForge\WorldForge\obj\Release\WorldForge.pdb
